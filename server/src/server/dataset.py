@@ -39,14 +39,12 @@ class SFTDataset(Dataset):
 
         conversations = data["conversations"]
 
-        for i in range(0, len(conversations) - 1, 2):
-            if (
-                conversations[i]["role"] != "user"
-                or conversations[i + 1]["role"] != "assistant"
-            ):
+        for user_msg, assistant_msg in zip(conversations[::2], conversations[1::2]):
+            if user_msg["role"] != "user" or assistant_msg["role"] != "assistant":
                 raise ValueError("The role order of the conversation is not correct")
-            human = conversations[i]["content"].strip()
-            assistant = conversations[i + 1]["content"].strip()
+
+            human = user_msg["content"].strip()
+            assistant = assistant_msg["content"].strip()
 
             human = self.user_format.format(
                 content=human, stop_token=self.tokenizer.eos_token

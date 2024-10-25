@@ -22,7 +22,8 @@
   "forwardPorts": [
     3000
   ],
-  "workspaceFolder": "source=${localWorkspaceFolder},target=/workspace,type=bind",
+  // "workspaceMount": "source=${localWorkspaceFolder},target=/workspace",
+  "workspaceFolder": "/workspace",
   "postCreateCommand": "echo 'Container ready!'",
   "remoteUser": "vscode"
 }

@@ -1,7 +1,7 @@
 version: '3'
 
 services:
-  restapi:
+  server:
     build:
       context: ../server
       dockerfile: Dockerfile
@@ -10,7 +10,7 @@ services:
     volumes:
       - ../server:/app  # Mount the restapi folder
 
-  desktop-app:
+  desktop:
     build:
       context: ../desktop
       dockerfile: Dockerfile

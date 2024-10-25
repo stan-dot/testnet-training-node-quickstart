@@ -1,3 +1,5 @@
+from dataclasses import dataclass
+from fastapi import FastAPI
 import json
 import os
 import time
@@ -11,6 +13,19 @@ from demo import LoraTrainingArguments, train_lora
 from utils.constants import model2base_model, model2size
 from utils.flock_api import get_task, submit_task
 from utils.gpu_utils import get_gpu_type
+
+@dataclass
+class MyServerConfig:
+    hf_username: str
+
+
+app = FastAPI()
+
+
+@app.get("/")
+async def root():
+    return {"message": "Hello World"}
+print("hello world")
 
 HF_USERNAME = os.environ["HF_USERNAME"]
 

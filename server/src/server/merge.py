@@ -6,7 +6,7 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 def merge_lora_to_base_model(
     model_name_or_path: str, adapter_name_or_path: str, save_path: str
-):
+)->None:
     tokenizer = AutoTokenizer.from_pretrained(
         adapter_name_or_path,
         use_fast=True,
