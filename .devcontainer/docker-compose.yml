@@ -1,0 +1,19 @@
+version: '3'
+
+services:
+  restapi:
+    build:
+      context: ../server
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"  # Expose the REST API port
+    volumes:
+      - ../server:/app  # Mount the restapi folder
+
+  desktop-app:
+    build:
+      context: ../desktop
+      dockerfile: Dockerfile
+    volumes:
+      - ../desktop:/app  # Mount the desktop app folder
+    # Optional, expose port if it has a web interface, else leave out

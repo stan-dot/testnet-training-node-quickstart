@@ -1,16 +1,16 @@
 {
-  "name": "Go and Node.js Dev Container",
-  "build": {
-    "dockerfile": "Dockerfile",
-    "context": ".."
-  },
+  "name": "Monorepo Dev Container",
+  "dockerComposeFile": "docker-compose.yml",
+  "service": "server", // Primary service to open terminal in
   "customizations": {
     "settings": {
       "terminal.integrated.shell.linux": "/bin/bash"
     },
     "extensions": [
       "golang.go",
-      "dbaeumer.vscode-eslint"
+      "dbaeumer.vscode-eslint",
+      "ms-python.python",
+      "ms-python.vscode-pylance" // Python support in VS Code
     ]
   },
   "features": {
@@ -22,7 +22,7 @@
   "forwardPorts": [
     3000
   ],
-  "workspaceMount": "workspace",
+  "workspaceFolder": "source=${localWorkspaceFolder},target=/workspace,type=bind",
   "postCreateCommand": "echo 'Container ready!'",
-  "remoteUser": "root"
+  "remoteUser": "vscode"
 }
