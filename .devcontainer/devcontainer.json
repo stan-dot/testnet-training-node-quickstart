@@ -1,0 +1,28 @@
+{
+  "name": "Go and Node.js Dev Container",
+  "build": {
+    "dockerfile": "Dockerfile",
+    "context": ".."
+  },
+  "customizations": {
+    "settings": {
+      "terminal.integrated.shell.linux": "/bin/bash"
+    },
+    "extensions": [
+      "golang.go",
+      "dbaeumer.vscode-eslint"
+    ]
+  },
+  "features": {
+    // Some default things like git config
+    "ghcr.io/devcontainers/features/common-utils:2": {
+      "upgradePackages": false
+    }
+  },
+  "forwardPorts": [
+    3000
+  ],
+  "workspaceMount": "workspace",
+  "postCreateCommand": "echo 'Container ready!'",
+  "remoteUser": "root"
+}
