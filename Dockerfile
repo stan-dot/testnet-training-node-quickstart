@@ -1,4 +1,6 @@
-FROM nvidia/cuda:11.3.1-runtime-ubuntu20.04
+# FROM nvidia/cuda:11.3.1-runtime-ubuntu20.04
+FROM docker.io/nvidia/cuda:12.6.2-cudnn-devel-ubuntu22.04 as server
+
 
 RUN apt-get update && apt-get install -y \
     python3-dev \
