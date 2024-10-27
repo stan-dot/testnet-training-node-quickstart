@@ -1,46 +1,90 @@
 import json
-import json
-import torch
-from peft import PeftModel
-from transformers import AutoModelForCausalLM, AutoTokenizer
-
-
-import json
-from typing import Any, Dict, List
-
-import torch
-from loguru import logger
-from torch.utils.data import Dataset
-
-import json
 import os
-
-import requests
-
-
-from torch.cuda import get_device_name
-import os
-import time
-
-import requests
-import yaml
-from loguru import logger
-from huggingface_hub import HfApi
-
-from demo import LoraTrainingArguments, train_lora
-
-import os
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from typing import Any
 
+import fastapi
+import requests
 import torch
-from peft import LoraConfig
+import yaml
+from datasets import Dataset
+from huggingface_hub import HfApi
+from loguru import logger
+from peft.peft_model import PeftModel
+from peft.tuners.lora import LoraConfig
+from torch.cuda import get_device_name
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-from trl import SFTTrainer, SFTConfig
+from trl import SFTConfig, SFTTrainer
 
-FLOCK_API_KEY = os.environ["FLOCK_API_KEY"]
+from server.models import ModelConfig, model_configs
+
+FLOCK_API_KEY = os.environ.get("FLOCK_API_KEY", "empty")
 FED_LEDGER_BASE_URL = "https://fed-ledger-prod.flock.io/api/v1"
 
-HF_USERNAME = os.environ["HF_USERNAME"]
+HF_USERNAME = os.environ.get("HF_USERNAME", "empty")
+
+
+def get_gpu_type():
+    try:
+        gpu_name = get_device_name(0)
+        return gpu_name
+    except Exception as e:
+        return f"Error retrieving GPU type: {e}"
+
+
+gpu_type = get_gpu_type()
+tasks = {}
+
+
+@asynccontextmanager
+async def lifespan(app: fastapi.FastAPI):
+    # Load the ML model
+    yield
+    os.system("rm -rf merged_model")
+    os.system("rm -rf outputs")
+
+
+app = fastapi.FastAPI()
+
+
+@app.get("/tasks")
+async def list_tasks():
+    """List all tasks with their statuses."""
+    return tasks
+
+
+@app.get("/")
+async def root():
+    return {"message": "Hello World"}
+
+
+@app.get("/models", response_model=list[dict])  # noqa: F821
+def list_models():
+    """Route to list all available model configurations."""
+    return [
+        {
+            "model_name": model_name,
+            "size": config.size,
+            "base_model": config.base_model,
+            "template": {
+                "system_format": config.template.system_format,
+                "user_format": config.template.user_format,
+                "assistant_format": config.template.assistant_format,
+                "system": config.template.system,
+            },
+        }
+        for model_name, config in model_configs.items()
+    ]
+
+
+def get_model_configs_below_size(size: int) -> dict[str, ModelConfig]:
+    """
+    Helper function to get all model configurations
+    with a size less than the specified value.
+    """
+    return {k: v for k, v in model_configs.items() if v.size < size}
+
 
 @dataclass
 class LoraTrainingArguments:
@@ -53,17 +97,20 @@ class LoraTrainingArguments:
 
 
 def train_lora(
-    model_id: str, context_length: int, training_args: LoraTrainingArguments
+    raw_args: LoraTrainingArguments,
+    model_id: str = list(model_configs)[0],
+    context_length: int = 1024,
+    model: ModelConfig = model_configs[list(model_configs)[0]],
 ):
-    assert model_id in model2template, f"model_id {model_id} not supported"
+    logger.info(f"Start to train the model {model_id}...")
     lora_config = LoraConfig(
-        r=training_args.lora_rank,
+        r=raw_args.lora_rank,
         target_modules=[
             "q_proj",
             "v_proj",
         ],
-        lora_alpha=training_args.lora_alpha,
-        lora_dropout=training_args.lora_dropout,
+        lora_alpha=raw_args.lora_alpha,
+        lora_dropout=raw_args.lora_dropout,
         task_type="CAUSAL_LM",
     )
 
@@ -75,8 +122,8 @@ def train_lora(
     )
 
     training_args = SFTConfig(
-        per_device_train_batch_size=training_args.per_device_train_batch_size,
-        gradient_accumulation_steps=training_args.gradient_accumulation_steps,
+        per_device_train_batch_size=raw_args.per_device_train_batch_size,
+        gradient_accumulation_steps=raw_args.gradient_accumulation_steps,
         warmup_steps=100,
         learning_rate=2e-4,
         bf16=True,
@@ -84,7 +131,7 @@ def train_lora(
         output_dir="outputs",
         optim="paged_adamw_8bit",
         remove_unused_columns=False,
-        num_train_epochs=training_args.num_train_epochs,
+        num_train_epochs=raw_args.num_train_epochs,
         max_seq_length=context_length,
     )
     tokenizer = AutoTokenizer.from_pretrained(
@@ -103,12 +150,12 @@ def train_lora(
         file="demo_data.jsonl",
         tokenizer=tokenizer,
         max_seq_length=context_length,
-        template=model2template[model_id],
+        template=model.template,
     )
 
     # Define trainer
     trainer = SFTTrainer(
-        model=model,
+        model=model_id,
         train_dataset=dataset,
         args=training_args,
         peft_config=lora_config,
@@ -116,7 +163,7 @@ def train_lora(
     )
 
     # Train model
-    trainer.train()
+    trainer.train(self=trainer)
 
     # save model
     trainer.save_model("outputs")
@@ -127,7 +174,10 @@ def train_lora(
     # upload lora weights and tokenizer
     print("Training Completed.")
 
+
 class SFTDataset(Dataset):
+    system: str = "You are a helpful assistant."
+
     def __init__(self, file, tokenizer, max_seq_length, template):
         self.tokenizer = tokenizer
         self.system_format = template["system_format"]
@@ -135,10 +185,10 @@ class SFTDataset(Dataset):
         self.assistant_format = template["assistant_format"]
 
         self.max_seq_length = max_seq_length
-        logger.info("Loading data: {}".format(file))
-        with open(file, "r", encoding="utf8") as f:
+        logger.info(f"Loading data: {file}")
+        with open(file, encoding="utf8") as f:
             data_list = f.readlines()
-        logger.info("There are {} data in dataset".format(len(data_list)))
+        logger.info(f"There are {len(data_list)} data in dataset")
         self.data_list = data_list
 
     def __len__(self):
@@ -196,16 +246,17 @@ class SFTDataset(Dataset):
         return inputs
 
 
-class SFTDataCollator(object):
+class SFTDataCollator:
     def __init__(self, tokenizer, max_seq_length):
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
         self.pad_token_id = tokenizer.pad_token_id
 
-    def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def __call__(self, batch: list[dict[str, Any]]) -> dict[str, Any]:
         # Find the maximum length in the batch
         lengths = [len(x["input_ids"]) for x in batch if x["input_ids"] is not None]
-        # Take the maximum length in the batch, if it exceeds max_seq_length, take max_seq_length
+        # Take the maximum length in the batch
+        # if it exceeds max_seq_length, take max_seq_length
         batch_max_len = min(max(lengths), self.max_seq_length)
 
         input_ids_batch, attention_mask_batch, target_mask_batch = [], [], []
@@ -245,30 +296,33 @@ class SFTDataCollator(object):
         return inputs
 
 
-def get_gpu_type():
-    try:
-        gpu_name = get_device_name(0)
-        return gpu_name
-    except Exception as e:
-        return f"Error retrieving GPU type: {e}"
-
-def get_task(task_id: int):
+def get_active_decentralized_network_task(task_id: int):
     response = requests.request(
         "GET", f"{FED_LEDGER_BASE_URL}/tasks/get?task_id={task_id}"
     )
     return response.json()
 
-def submit_task(
-    task_id: int, hg_repo_id: str, base_model: str, gpu_type: str, revision: str
-):
+
+# Dataclass for Task Submission Parameters
+@dataclass
+class TaskSubmission:
+    task_id: int
+    hg_repo_id: str
+    base_model: str
+    gpu_type: str
+    commit_hash: str
+    revision: int
+
+
+def submit_task_result_to_decentralized_network(submission: TaskSubmission):
     payload = json.dumps(
         {
-            "task_id": task_id,
+            "task_id": submission.task_id,
             "data": {
-                "hg_repo_id": hg_repo_id,
-                "base_model": base_model,
-                "gpu_type": gpu_type,
-                "revision": revision,
+                "hg_repo_id": submission.hg_repo_id,
+                "base_model": submission.base_model,
+                "gpu_type": submission.gpu_type,
+                "revision": submission.revision,
             },
         }
     )
@@ -276,52 +330,25 @@ def submit_task(
         "flock-api-key": FLOCK_API_KEY,
         "Content-Type": "application/json",
     }
-    response = requests.request(
-        "POST",
-        f"{FED_LEDGER_BASE_URL}/tasks/submit-result",
-        headers=headers,
-        data=payload,
-    )
-    if response.status_code != 200:
-        raise Exception(f"Failed to submit task: {response.text}")
-    return response.json()
-qwen_template = {
-    "system_format": "<|im_start|>system\n{content}<|im_end|>\n",
-    "user_format": "<|im_start|>user\n{content}<|im_end|>\n<|im_start|>assistant\n",
-    "assistant_format": "{content}<|im_end|>\n",
-    "system": "You are a helpful assistant.",
-}
 
-gemma_template = {
-    "system_format": "<bos>",
-    "user_format": "<start_of_turn>user\n{content}<end_of_turn>\n<start_of_turn>model\n",
-    "assistant_format": "{content}<eos>\n",
-    "system": None,
-}
+    try:
+        response = requests.post(
+            f"{FED_LEDGER_BASE_URL}/tasks/submit-result",
+            headers=headers,
+            data=payload,
+        )
+        response.raise_for_status()  # Raise an error for 4xx/5xx status codes
+        return response.json()
 
-model2template = {
-    "Qwen/Qwen1.5-0.5B": qwen_template,
-    "Qwen/Qwen1.5-1.8B": qwen_template,
-    "Qwen/Qwen1.5-7B": qwen_template,
-    "google/gemma-2b": gemma_template,
-    "google/gemma-7b": gemma_template,
-}
+    except requests.HTTPError as e:
+        error_msg = f"Failed to submit task (HTTP error): {e.response.text}"
+        print(error_msg)
+        raise Exception(error_msg) from e
+    except requests.RequestException as e:
+        error_msg = f"Request error while submitting task: {e}"
+        print(error_msg)
+        raise Exception(error_msg) from e
 
-model2size = {
-    "Qwen/Qwen1.5-0.5B": 620_000_000,
-    "Qwen/Qwen1.5-1.8B": 1_840_000_000,
-    "Qwen/Qwen1.5-7B": 7_720_000_000,
-    "google/gemma-2b": 2_510_000_000,
-    "google/gemma-7b": 8_540_000_000,
-}
-
-model2base_model = {
-    "Qwen/Qwen1.5-0.5B": "qwen1.5",
-    "Qwen/Qwen1.5-1.8B": "qwen1.5",
-    "Qwen/Qwen1.5-7B": "qwen1.5",
-    "google/gemma-2b": "gemma",
-    "google/gemma-7b": "gemma",
-}
 
 def merge_lora_to_base_model(
     model_name_or_path: str, adapter_name_or_path: str, save_path: str
@@ -345,15 +372,18 @@ def merge_lora_to_base_model(
     tokenizer.save_pretrained(save_path)
     model.save_pretrained(save_path)
 
-if __name__ == "__main__":
-    task_id = os.environ["TASK_ID"]
+
+@app.route("/train", methods=["POST"])
+def train():
+    # task_id = os.environ["TASK_ID"]
+    task_id = 55
     # load trainin args
     # define the path of the current file
     current_folder = os.path.dirname(os.path.realpath(__file__))
-    with open(f"{current_folder}/training_args.yaml", "r") as f:
+    with open(f"{current_folder}/training_args.yaml") as f:
         all_training_args = yaml.safe_load(f)
 
-    task = get_task(task_id)
+    task = get_active_decentralized_network_task(task_id)
     # log the task info
     logger.info(json.dumps(task, indent=4))
     # download data from a presigned url
@@ -361,69 +391,66 @@ if __name__ == "__main__":
     context_length = task["data"]["context_length"]
     max_params = task["data"]["max_params"]
 
-    # filter out the model within the max_params
-    model2size = {k: v for k, v in model2size.items() if v <= max_params}
-    all_training_args = {k: v for k, v in all_training_args.items() if k in model2size}
-    logger.info(f"Models within the max_params: {all_training_args.keys()}")
+    valid_models = get_model_configs_below_size(max_params)
+    logger.info(f"Models within the max_params: {valid_models}")
     # download in chunks
     response = requests.get(data_url, stream=True)
     with open("demo_data.jsonl", "wb") as f:
         for chunk in response.iter_content(chunk_size=8192):
             f.write(chunk)
 
+    # for testing now
+    model_id = list(valid_models.keys())[0]
+    model_config = valid_models[model_id]
+
     # train all feasible models and merge
-    for model_id in all_training_args.keys():
-        logger.info(f"Start to train the model {model_id}...")
-        # if OOM, proceed to the next model
+    # if OOM, proceed to the next model
+    try:
+        train_lora(
+            context_length=context_length,
+            raw_args=LoraTrainingArguments(**all_training_args[model_id]),
+        )
+    except RuntimeError as e:
+        logger.error(f"Error: {e}")
+        logger.info("Proceed to the next model...")
+
+    # generate a random repo id based on timestamp
+
+    try:
+        logger.info("Start to push the lora weight to the hub...")
+        api = HfApi(token=os.environ["HF_TOKEN"])
+        repo_name = f"{HF_USERNAME}/task-{task_id}-{model_id.replace('/', '-')}"
+        # check whether the repo exists
         try:
-            train_lora(
-                model_id=model_id,
-                context_length=context_length,
-                training_args=LoraTrainingArguments(**all_training_args[model_id]),
-            )
-        except RuntimeError as e:
-            logger.error(f"Error: {e}")
-            logger.info("Proceed to the next model...")
-            continue
-
-        # generate a random repo id based on timestamp
-        gpu_type = get_gpu_type()
-
-        try:
-            logger.info("Start to push the lora weight to the hub...")
-            api = HfApi(token=os.environ["HF_TOKEN"])
-            repo_name = f"{HF_USERNAME}/task-{task_id}-{model_id.replace('/', '-')}"
-            # check whether the repo exists
-            try:
-                api.create_repo(
-                    repo_name,
-                    exist_ok=False,
-                    repo_type="model",
-                )
-            except Exception as e:
-                logger.info(
-                    f"Repo {repo_name} already exists. Will commit the new version."
-                )
-
-            commit_message = api.upload_folder(
-                folder_path="outputs",
-                repo_id=repo_name,
+            api.create_repo(
+                repo_name,
+                exist_ok=False,
                 repo_type="model",
             )
-            # get commit hash
-            commit_hash = commit_message.oid
-            logger.info(f"Commit hash: {commit_hash}")
-            logger.info(f"Repo name: {repo_name}")
-            # submit
-            submit_task(
-                task_id, repo_name, model2base_model[model_id], gpu_type, commit_hash
-            )
-            logger.info("Task submitted successfully")
         except Exception as e:
-            logger.error(f"Error: {e}")
-            logger.info("Proceed to the next model...")
-        finally:
-            # cleanup merged_model and output
-            os.system("rm -rf merged_model")
-            os.system("rm -rf outputs")
-            continue
+            logger.info(
+                f"Repo {repo_name} already exists. Will commit the new version."
+            )
+
+        commit_message = api.upload_folder(
+            folder_path="outputs",
+            repo_id=repo_name,
+            repo_type="model",
+        )
+        # get commit hash
+        commit_hash = commit_message.oid
+        logger.info(f"Commit hash: {commit_hash}")
+        logger.info(f"Repo name: {repo_name}")
+        # submit
+        submission = TaskSubmission(
+            int(task_id),
+            repo_name,
+            model_config.base_model,
+            gpu_type,
+            commit_hash,
+            revision=4,
+        )
+        submit_task_result_to_decentralized_network(submission)
+        logger.info("Task submitted successfully")
+    except Exception as e:
+        logger.error(f"Error: {e}")

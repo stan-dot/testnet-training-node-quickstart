@@ -2,7 +2,7 @@
   "name": "fastapi",
   "build": {
     "dockerfile": "../Dockerfile",
-    "context": ".."
+    "context": "."
   },
   "customizations": {
     "vscode": {
