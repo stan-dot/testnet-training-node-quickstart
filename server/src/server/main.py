@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from typing import Any
@@ -7,18 +8,29 @@ from typing import Any
 import fastapi
 import requests
 import torch
-import yaml
 from datasets import Dataset
 from huggingface_hub import HfApi
 from loguru import logger
 from peft.peft_model import PeftModel
 from peft.tuners.lora import LoraConfig
 from torch.cuda import get_device_name
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from transformers import (
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    BitsAndBytesConfig,
+    TrainerCallback,
+)
 from trl import SFTConfig, SFTTrainer
 
+from server.dto import (
+    FineTuningArguments,
+    LoraTrainingArguments,
+    TaskState,
+    TrainingParams,
+)
 from server.models import ModelConfig, model_configs
 
+tasks_lock = threading.Lock()
 FLOCK_API_KEY = os.environ.get("FLOCK_API_KEY", "empty")
 FED_LEDGER_BASE_URL = "https://fed-ledger-prod.flock.io/api/v1"
 
@@ -54,11 +66,6 @@ async def list_tasks():
     return tasks
 
 
-@app.get("/")
-async def root():
-    return {"message": "Hello World"}
-
-
 @app.get("/models", response_model=list[dict])  # noqa: F821
 def list_models():
     """Route to list all available model configurations."""
@@ -86,31 +93,32 @@ def get_model_configs_below_size(size: int) -> dict[str, ModelConfig]:
     return {k: v for k, v in model_configs.items() if v.size < size}
 
 
-@dataclass
-class LoraTrainingArguments:
-    per_device_train_batch_size: int
-    gradient_accumulation_steps: int
-    num_train_epochs: int
-    lora_rank: int
-    lora_alpha: int
-    lora_dropout: int
+class TrainingProgressCallback(TrainerCallback):
+    def __init__(self, task_name: str):
+        self.task_name = task_name
+
+    def on_epoch_end(self, args, state, control, **kwargs):
+        with tasks_lock:
+            if self.task_name in tasks:
+                tasks[self.task_name]["current_progress"] += 1
 
 
 def train_lora(
-    raw_args: LoraTrainingArguments,
+    lora_args: LoraTrainingArguments,
     model_id: str = list(model_configs)[0],
     context_length: int = 1024,
     model: ModelConfig = model_configs[list(model_configs)[0]],
+    fine_tuning_args: FineTuningArguments | None = None,
 ):
     logger.info(f"Start to train the model {model_id}...")
     lora_config = LoraConfig(
-        r=raw_args.lora_rank,
+        r=lora_args.lora_rank,
         target_modules=[
             "q_proj",
             "v_proj",
         ],
-        lora_alpha=raw_args.lora_alpha,
-        lora_dropout=raw_args.lora_dropout,
+        lora_alpha=lora_args.lora_alpha,
+        lora_dropout=lora_args.lora_dropout,
         task_type="CAUSAL_LM",
     )
 
@@ -122,18 +130,27 @@ def train_lora(
     )
 
     training_args = SFTConfig(
-        per_device_train_batch_size=raw_args.per_device_train_batch_size,
-        gradient_accumulation_steps=raw_args.gradient_accumulation_steps,
-        warmup_steps=100,
-        learning_rate=2e-4,
-        bf16=True,
-        logging_steps=20,
+        per_device_train_batch_size=lora_args.per_device_train_batch_size,
+        gradient_accumulation_steps=lora_args.gradient_accumulation_steps,
+        warmup_steps=fine_tuning_args.warmup_steps
+        if fine_tuning_args and fine_tuning_args.warmup_steps is not None
+        else 100,
+        learning_rate=fine_tuning_args.learning_rate
+        if fine_tuning_args and fine_tuning_args.learning_rate is not None
+        else 2e-4,
+        bf16=fine_tuning_args.bf16
+        if fine_tuning_args and fine_tuning_args.bf16 is not None
+        else True,
+        logging_steps=fine_tuning_args.logging_steps
+        if fine_tuning_args and fine_tuning_args.logging_steps is not None
+        else 20,
         output_dir="outputs",
         optim="paged_adamw_8bit",
         remove_unused_columns=False,
-        num_train_epochs=raw_args.num_train_epochs,
+        num_train_epochs=lora_args.num_train_epochs,
         max_seq_length=context_length,
     )
+
     tokenizer = AutoTokenizer.from_pretrained(
         model_id,
         use_fast=True,
@@ -160,6 +177,7 @@ def train_lora(
         args=training_args,
         peft_config=lora_config,
         data_collator=SFTDataCollator(tokenizer, max_seq_length=context_length),
+        callbacks=[TrainingProgressCallback(model_id)],
     )
 
     # Train model
@@ -373,15 +391,34 @@ def merge_lora_to_base_model(
     model.save_pretrained(save_path)
 
 
-@app.route("/train", methods=["POST"])
-def train():
+@app.get("/task_progress/{model_name}")
+async def get_task_progress(model_name: str):
+    with tasks_lock:
+        task = tasks.get(model_name)
+        if task is None:
+            raise fastapi.HTTPException(status_code=404, detail="Task not found")
+        return {"model_name": model_name, "progress": task}
+
+
+@app.post("/train")
+def train(args: TrainingParams):
     # task_id = os.environ["TASK_ID"]
     task_id = 55
-    # load trainin args
-    # define the path of the current file
-    current_folder = os.path.dirname(os.path.realpath(__file__))
-    with open(f"{current_folder}/training_args.yaml") as f:
-        all_training_args = yaml.safe_load(f)
+    # Example logic to start the training process with args
+    # Here you would typically call some training function or service
+    training_details = {
+        "per_device_train_batch_size": args.lora_params.per_device_train_batch_size,
+        "gradient_accumulation_steps": args.lora_params.gradient_accumulation_steps,
+        "num_train_epochs": args.lora_params.num_train_epochs,
+        "lora_rank": args.lora_params.lora_rank,
+        "lora_alpha": args.lora_params.lora_alpha,
+        "lora_dropout": args.lora_params.lora_dropout,
+    }
+    # Initialize the task in the global tasks state
+    with tasks_lock:
+        tasks[args.model_name] = TaskState(
+            total_steps=training_details["num_train_epochs"], current_progress=0
+        )  # noqa: E501
 
     task = get_active_decentralized_network_task(task_id)
     # log the task info
@@ -403,18 +440,15 @@ def train():
     model_id = list(valid_models.keys())[0]
     model_config = valid_models[model_id]
 
-    # train all feasible models and merge
-    # if OOM, proceed to the next model
     try:
         train_lora(
             context_length=context_length,
-            raw_args=LoraTrainingArguments(**all_training_args[model_id]),
+            lora_args=args.lora_params,
+            fine_tuning_args=args.fine_tuning_params,
         )
     except RuntimeError as e:
         logger.error(f"Error: {e}")
         logger.info("Proceed to the next model...")
-
-    # generate a random repo id based on timestamp
 
     try:
         logger.info("Start to push the lora weight to the hub...")
@@ -427,7 +461,7 @@ def train():
                 exist_ok=False,
                 repo_type="model",
             )
-        except Exception as e:
+        except Exception:
             logger.info(
                 f"Repo {repo_name} already exists. Will commit the new version."
             )
@@ -454,3 +488,10 @@ def train():
         logger.info("Task submitted successfully")
     except Exception as e:
         logger.error(f"Error: {e}")
+
+
+# Start the FastAPI server
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(app, host="0.0.0.0", port=8000)
