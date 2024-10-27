@@ -1,13 +1,12 @@
 import os
 from dataclasses import dataclass
+from pathlib import Path
 
 import torch
-from peft import LoraConfig
-from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-from trl import SFTTrainer, SFTConfig
-
 from dataset import SFTDataCollator, SFTDataset
-from merge import merge_lora_to_base_model
+from peft.tuners.lora import LoraConfig
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+from trl import SFTConfig, SFTTrainer
 from utils.constants import model2template
 
 
@@ -18,21 +17,21 @@ class LoraTrainingArguments:
     num_train_epochs: int
     lora_rank: int
     lora_alpha: int
-    lora_dropout: int
+    lora_dropout_rate: float
 
 
-def train_lora(
-    model_id: str, context_length: int, training_args: LoraTrainingArguments
-)-> None:
+def create_learning_task(
+    model_id: str, context_length: int, raw_args: LoraTrainingArguments
+) -> None:
     assert model_id in model2template, f"model_id {model_id} not supported"
     lora_config = LoraConfig(
-        r=training_args.lora_rank,
+        r=raw_args.lora_rank,
         target_modules=[
             "q_proj",
             "v_proj",
         ],
-        lora_alpha=training_args.lora_alpha,
-        lora_dropout=training_args.lora_dropout,
+        lora_alpha=raw_args.lora_alpha,
+        lora_dropout=raw_args.lora_dropout_rate,
         task_type="CAUSAL_LM",
     )
 
@@ -44,8 +43,8 @@ def train_lora(
     )
 
     training_args = SFTConfig(
-        per_device_train_batch_size=training_args.per_device_train_batch_size,
-        gradient_accumulation_steps=training_args.gradient_accumulation_steps,
+        per_device_train_batch_size=raw_args.per_device_train_batch_size,
+        gradient_accumulation_steps=raw_args.gradient_accumulation_steps,
         warmup_steps=100,
         learning_rate=2e-4,
         bf16=True,
@@ -53,7 +52,7 @@ def train_lora(
         output_dir="outputs",
         optim="paged_adamw_8bit",
         remove_unused_columns=False,
-        num_train_epochs=training_args.num_train_epochs,
+        num_train_epochs=raw_args.num_train_epochs,
         max_seq_length=context_length,
     )
     tokenizer = AutoTokenizer.from_pretrained(
@@ -69,7 +68,7 @@ def train_lora(
 
     # Load dataset
     dataset = SFTDataset(
-        file="../data/demo_data.jsonl",
+        file=Path("../data/demo_data.jsonl"),
         tokenizer=tokenizer,
         max_seq_length=context_length,
         template=model2template[model_id],

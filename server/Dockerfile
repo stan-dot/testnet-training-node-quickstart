@@ -1,5 +1,7 @@
 # restapi/Dockerfile
-FROM nvidia/cuda:11.3.1-runtime-ubuntu20.04 as server
+# FROM nvidia/cuda:11.3.1-runtime-ubuntu20.04 as server
+FROM docker.io/nvidia/cuda:12.6.2-cudnn-devel-ubuntu22.04 as server
+
 # FROM python:3.11-slim
 
 
@@ -18,7 +20,7 @@ WORKDIR /app
 # Copy the rest of the application code
 # COPY . .
 
-CMD ["python", "hello.py"]
+CMD ["python", "src/hello.py"]
 # CMD ["python", "full_automation.py"]
 
 # CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]

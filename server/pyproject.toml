@@ -4,7 +4,7 @@ requires = ["setuptools>=64", "setuptools_scm[toml]>=6.2"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "flock_server"
+name = "server"
 dynamic = ["version"]
 requires-python = ">=3.10"
 

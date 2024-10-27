@@ -1,23 +1,26 @@
 import json
-from typing import Any, Dict, List
+from pathlib import Path
+from typing import Any
 
 import torch
+from datasets import Dataset
 from loguru import logger
-from torch.utils.data import Dataset
 
 
 class SFTDataset(Dataset):
-    def __init__(self, file, tokenizer, max_seq_length, template):
+    system: str = "You're a great assistant"
+
+    def __init__(self, file: Path, tokenizer, max_seq_length: int, template):
         self.tokenizer = tokenizer
         self.system_format = template["system_format"]
         self.user_format = template["user_format"]
         self.assistant_format = template["assistant_format"]
 
         self.max_seq_length = max_seq_length
-        logger.info("Loading data: {}".format(file))
-        with open(file, "r", encoding="utf8") as f:
+        logger.info(f"Loading data: {file}")
+        with open(file, encoding="utf8") as f:
             data_list = f.readlines()
-        logger.info("There are {} data in dataset".format(len(data_list)))
+        logger.info(f"There are {len(data_list)} data in dataset")
         self.data_list = data_list
 
     def __len__(self):
@@ -39,7 +42,9 @@ class SFTDataset(Dataset):
 
         conversations = data["conversations"]
 
-        for user_msg, assistant_msg in zip(conversations[::2], conversations[1::2]):
+        for user_msg, assistant_msg in zip(
+            conversations[::2], conversations[1::2], strict=False
+        ):
             if user_msg["role"] != "user" or assistant_msg["role"] != "assistant":
                 raise ValueError("The role order of the conversation is not correct")
 
@@ -73,18 +78,34 @@ class SFTDataset(Dataset):
         return inputs
 
 
-class SFTDataCollator(object):
+class SFTDataCollator:
     def __init__(self, tokenizer, max_seq_length):
         self.tokenizer = tokenizer
         self.max_seq_length = max_seq_length
         self.pad_token_id = tokenizer.pad_token_id
 
-    def __call__(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
+    def __call__(self, batch: list[dict[str, Any]]) -> dict[str, Any]:
         # Find the maximum length in the batch
         lengths = [len(x["input_ids"]) for x in batch if x["input_ids"] is not None]
-        # Take the maximum length in the batch, if it exceeds max_seq_length, take max_seq_length
+        # Take the maximum length in the batch
+        # if it exceeds max_seq_length, take max_seq_length
         batch_max_len = min(max(lengths), self.max_seq_length)
 
+        input_ids_batch, attention_mask_batch, target_mask_batch = (
+            self._get_batch_values(batch, batch_max_len)
+        )
+
+        labels = torch.where(target_mask_batch == 1, input_ids_batch, -100)
+        inputs = {
+            "input_ids": input_ids_batch,
+            "attention_mask": attention_mask_batch,
+            "labels": labels,
+        }
+        return inputs
+
+    def _get_batch_values(
+        self, batch: list[dict[str, Any]], batch_max_len: int
+    ) -> list[torch.Tensor]:
         input_ids_batch, attention_mask_batch, target_mask_batch = [], [], []
         # Truncate and pad
         for x in batch:
@@ -108,15 +129,9 @@ class SFTDataCollator(object):
             attention_mask_batch.append(attention_mask)
             target_mask_batch.append(target_mask)
 
-        # Convert lists to tensors to get the final model input
+            # Convert lists to tensors to get the final model input
         input_ids_batch = torch.tensor(input_ids_batch, dtype=torch.long)
         attention_mask_batch = torch.tensor(attention_mask_batch, dtype=torch.long)
         target_mask_batch = torch.tensor(target_mask_batch, dtype=torch.long)
 
-        labels = torch.where(target_mask_batch == 1, input_ids_batch, -100)
-        inputs = {
-            "input_ids": input_ids_batch,
-            "attention_mask": attention_mask_batch,
-            "labels": labels,
-        }
-        return inputs
+        return [input_ids_batch, attention_mask_batch, target_mask_batch]

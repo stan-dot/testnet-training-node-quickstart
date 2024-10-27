@@ -17,7 +17,7 @@ def get_task(task_id: int):
 def submit_task(
     task_id: int, hg_repo_id: str, base_model: str, gpu_type: str, revision: str
 ):
-    payload = json.dumps(
+    payload: str = json.dumps(
         {
             "task_id": task_id,
             "data": {
