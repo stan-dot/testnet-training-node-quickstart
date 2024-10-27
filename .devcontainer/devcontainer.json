@@ -1,17 +1,26 @@
 {
-  "name": "Go and Node.js Dev Container",
+  "name": "fastapi",
   "build": {
-    "dockerfile": "Dockerfile",
+    "dockerfile": "../Dockerfile",
     "context": ".."
   },
   "customizations": {
-    "settings": {
-      "terminal.integrated.shell.linux": "/bin/bash"
-    },
-    "extensions": [
-      "golang.go",
-      "dbaeumer.vscode-eslint"
-    ]
+    "vscode": {
+      // Set *default* container specific settings.json values on container create.
+      "settings": {
+        "python.defaultInterpreterPath": "/venv/bin/python"
+      },
+      // Add the IDs of extensions you want installed when the container is created.
+      "extensions": [
+        "ms-python.python",
+        "github.vscode-github-actions",
+        "tamasfe.even-better-toml",
+        "redhat.vscode-yaml",
+        "ryanluker.vscode-coverage-gutters",
+        "charliermarsh.ruff",
+        "ms-azuretools.vscode-docker"
+      ]
+    }
   },
   "features": {
     // Some default things like git config
@@ -19,6 +28,11 @@
       "upgradePackages": false
     }
   },
+  "runArgs": [
+    // Allow the container to access the host network
+    "--net=host",
+    "--security-opt=label=disable"
+  ],
   "forwardPorts": [
     3000
   ],
